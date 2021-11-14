@@ -1,0 +1,502 @@
+---
+title: "EEG_Permutation_Analyses"
+author: "Daniele Scanzi"
+date: "14/11/2021"
+output: html_document
+---
+
+```{r include=FALSE}
+### Set up the environment  ###
+
+# Load all the necessary packages
+library(here)
+library(tidyverse)
+library(janitor)
+library(ggplot2)
+library(Rmisc)
+library(RColorBrewer)
+library(ggthemes)
+library(permuco)
+library(brms)
+library(ggmcmc)
+library(mcmc)
+library(ggthemr)
+
+# Plotting Theme
+palette <- define_palette(
+  swatch = c('#111111', '#E84646', '#233B43', '#C29365', '#168E7F', '#65ADC2', '#109B37', '#DB784D', '#f1c40f'),
+  gradient = c(lower = '#E84646', upper = '#109B37'))
+ggthemr(palette, layout = 'scientific')
+
+# Distractors sides
+right.distractors <- c(2,3,4,5,6,7,8)
+left.distractors <- c(10,11,12,13,14,15,16)
+```
+
+```{r}
+### LOAD AND PREPARE DATA ###
+# Data was extracted through MATLAB and required some data wrangling
+
+
+# HIGH WMC DATA
+# Dataset should be contained in a folder called Datasets within the current directory
+highWMCdata <- read_csv(here::here('Datasets', 'EEG_SingleTrial_High.csv')) %>% 
+  # Pivot longer 
+  tidyr::pivot_longer(cols      = '-200':dplyr::last_col(),
+                      names_to  = 'time_point',
+                      values_to = 'signal') %>% 
+  # Clean column names (all lower case, style:name1_name2)
+  janitor::clean_names() %>% 
+  # Select relevant coloumns
+  dplyr::select(trial,part_column, wmc_column, electrode, electrode_position, distractor_type, distractor_colour, distractor_position, time_point, signal) %>% 
+  dplyr::rename(wmc = wmc_column,
+                id  = part_column) %>% 
+  dplyr::mutate(wmc = replace(wmc, wmc == 'hig', 'high'))
+
+
+# LOW WMC DATA
+# Dataset should be contained in a folder called Datasets within the current directory
+lowWMCdata <- read_csv(here::here('SingleTrials_Datasets', 'Low_SingleTrial_All.csv')) %>% 
+  # Pivot longer
+  tidyr::pivot_longer(cols      = '-200':dplyr::last_col(),
+                      names_to  = 'time_point',
+                      values_to = 'signal') %>% 
+  # Clean column names
+  janitor::clean_names() %>% 
+  dplyr::select(trial,part_column, wmc_column, electrode, electrode_position, distractor_type, distractor_colour, distractor_position, time_point, signal) %>% 
+  dplyr::rename(wmc = wmc_column,
+                id  = part_column) %>% 
+  dplyr::mutate(wmc = replace(wmc, wmc == 'hig', 'high'))
+
+# Join the data in a single dataset
+trialData <- rbind(highWMCdata,
+                   lowWMCdata) %>% 
+  # Trasform relevant columns into factors
+  dplyr::mutate(id                  = factor(id),
+                wmc                 = factor(wmc),
+                electrode           = factor(electrode),
+                electrode_position  = factor(electrode_position),
+                distractor_type     = factor(distractor_type),
+                distractor_colour   = factor(distractor_colour),
+                distractor_position = as_factor(distractor_position),
+                time_point          = as.numeric(time_point))
+```
+
+# Compute subtraction
+
+Ipsi - Contralateral in reference to the side of the presentation of the distractor
+```{r}
+### Compute subtracted waveforms ###
+trialSubtracted <- trialData %>% 
+  dplyr::select(!electrode) %>% 
+  tidyr::pivot_wider(names_from  = electrode_position,
+                     values_from = signal) %>% 
+  # Compute contra - Ipsi
+  dplyr::mutate(subtracted = contra - ipsi) %>% 
+  dplyr::group_by()
+```
+
+```{r}
+### Averages ###
+
+# Compute across trials - within condition for each subject
+subjectAvg <- trialSubtracted %>% 
+  dplyr::group_by(wmc, id, distractor_type, distractor_colour, time_point) %>% 
+  dplyr::summarise(avg_signal = mean(subtracted)) %>% 
+  dplyr::ungroup()
+
+#Compute across trials - within condition
+conditionAvg <- trialSubtracted %>% 
+  dplyr::group_by(wmc, distractor_type, distractor_colour, time_point) %>% 
+  dplyr::summarise(avg_signal = mean(subtracted)) %>% 
+  dplyr::ungroup()
+```
+
+## Butterfly Plots
+```{r}
+### Plot butterfly plots for each condition ###
+
+# High WMC
+subjectAvg %>% 
+  dplyr::filter(wmc == 'high') %>% 
+  dplyr::group_by(wmc, id, distractor_type, time_point) %>% 
+  dplyr::summarise(avg_signal = mean(avg_signal)) %>% 
+  ggplot(aes(x      = time_point, 
+             y      = avg_signal,
+             fill   = id,
+             colour = id)) +
+  geom_line(size  = .75,
+            alpha = .85) +
+  # Set axis ticks
+  scale_x_continuous(breaks = c(seq(-200, 800, 200))) +
+  scale_y_continuous(breaks = c(seq(-5, 5, 0.5))) + 
+  coord_cartesian() +
+  # Add orizontal line at 0 and red vertical line at onset of stimulus
+  geom_hline(yintercept = 0) +
+  geom_vline(xintercept = 0, colour = 'red') +
+   # Set labels
+  labs(x     = 'Time (ms)',
+       y     = 'Amplitude (mV)',
+       title = 'Butterfly plots for each condition P58/P96') +
+  theme_tufte(base_size = 12) +
+  facet_grid(id~distractor_type) +
+  theme(legend.position = 'none') 
+
+# Low WMC
+subjectAvg %>% 
+  dplyr::filter(wmc == 'low') %>% 
+  dplyr::group_by(wmc, id, distractor_type, time_point) %>% 
+  dplyr::summarise(avg_signal = mean(avg_signal)) %>% 
+  ggplot(aes(x      = time_point, 
+             y      = avg_signal,
+             fill   = id,
+             colour = id)) +
+  geom_line(size  = .75,
+            alpha = .85) +
+  # Set axis ticks
+  scale_x_continuous(breaks = c(seq(-200, 800, 200))) +
+  scale_y_continuous(breaks = c(seq(-5, 5, 0.5))) + 
+  coord_cartesian() +
+  # Add orizontal line at 0 and red vertical line at onset of stimulus
+  geom_hline(yintercept = 0) +
+  geom_vline(xintercept = 0, colour = 'red') +
+   # Set labels
+  labs(x     = 'Time (ms)',
+       y     = 'Amplitude (mV)',
+       title = 'Butterfly plots for each condition P58/P96') +
+  theme_tufte(base_size = 12) +
+  facet_grid(id~distractor_type) +
+  theme(legend.position = 'none')
+```
+
+```{r}
+### ERPs wor WMC divided by colour
+conditionAvg %>% 
+  dplyr::group_by(wmc, distractor_type, distractor_colour) %>% 
+  ggplot(aes(x      = time_point, 
+             y      = avg_signal,
+             fill   = wmc,
+             colour = wmc)) +
+  geom_line(size = 1.2) +
+  # Define axis ticks
+  scale_x_continuous(breaks = c(seq(-200, 800, 100))) +
+  scale_y_continuous(breaks = c(seq(-5, 5, 0.2)),
+                     labels = scales::comma) + 
+  coord_cartesian() +
+  # Add Vertical line at 0
+  geom_hline(yintercept = 0) +
+  geom_vline(xintercept = 0, 
+             colour     = 'red') +
+  # Labels
+  labs(x     = 'Time (ms)',
+       y     = 'Amplitude (\U003BC V)',
+       title = "Grand Average ERP across WMC",
+       fill  = 'WMC group') +
+  # Set Theme
+  theme_tufte(base_size = 12) +
+  facet_grid(distractor_type ~ distractor_colour)
+```
+
+# Permutation Analyses
+```{r}
+### Set parameters ###
+set.seed(2021) # For replicability
+nperm <- 1000  # Number of permutations
+```
+
+```{r}
+### Prepare data to be used in permuco ###
+
+# Create wide dataset with a coloum for each time point
+permuDistrData <- subjectAvg %>% 
+
+  # Pivot wider to prepare data as permuco package requires
+  dplyr::group_by(wmc, id, distractor_type, distractor_colour) %>% 
+  tidyr::pivot_wider(names_from  = time_point,
+                     values_from = avg_signal) %>% 
+  # Remove datapoints before stimulus onset and after 456ms
+  dplyr::select(!('-200':'-4') & !('456':dplyr::last_col())) %>% 
+  dplyr::ungroup()
+
+# divide data into "data" and "design" datasets
+distrSignal <- permuDistrData %>% 
+  dplyr::select('0':last_col())
+
+distrDesign <- permuDistrData %>% 
+  dplyr::select(wmc:distractor_colour)
+```
+
+```{r}
+### Compute permutation Analyses
+permDistrTest <- permuco::clusterlm(distrSignal ~ wmc * distractor_type * distractor_colour + Error(id/(distractor_type * distractor_colour)),
+                                      data     = distrDesign,
+                                      method   = "Rde_kheradPajouh_renaud",
+                                      multcomp = 'troendle',
+                                      np       = nperm)
+
+plot(permDistrTest)
+permDistrTest
+```
+
+```{r}
+### Plot significant results
+
+# Significant time windows
+distractorPermutation <- permDistrTest[["multiple_comparison"]][["distractor_type"]][["troendle"]][["main"]] %>% 
+  dplyr::as_tibble() %>% 
+  tibble::rowid_to_column(var = 'time') %>% 
+  dplyr::mutate(time = (time * 4) - 4) # Shist time so that starts from 0
+
+
+distrPermuPlot <- distractorPermutation %>% 
+  ggplot(aes(x = time,
+             y = statistic)) +
+  geom_line(size   = .75, 
+            colour = palette$swatch[3]) +
+  geom_line(data= dplyr::filter(distractor.permutation, pvalue <= .05 & time < 300),
+            aes(x  = time, 
+                y  = statistic),
+            colour = palette$swatch[2],
+            size   = 1.2) +
+  geom_line(data = dplyr::filter(distractor.permutation, pvalue <= .05 & time > 300),
+            aes(x      = time, 
+                y      = statistic),
+                colour = palette$swatch[2],
+            size       = 1.2) +
+  geom_vline(xintercept = c(228, 276, 316, 412),
+             colour     = palette$swatch[2],
+             size       = 0.5) +
+  labs(x = 'Time (ms)',
+       y = 'Fisher Statistic')
+
+# ERP plot for distractor type effects
+distrTypeErp <- trialSubtracted %>% 
+  
+  # Extract ERPs for distractor type only (average across all other conditions)
+  dplyr::group_by(distractor_type, time_point) %>% 
+  dplyr::summarise(avg_signal = mean(subtracted)) %>% 
+  # Plot results
+  ggplot(aes(x      = time_point, 
+             y      = avg_signal,
+             fill   = distractor_type,
+             colour = distractor_type)) +
+  geom_line(size = 1.2) +
+  annotate('rect',
+           xmin    = 228,
+           xmax    = 276,
+           ymin    = -Inf,
+           ymax    = +Inf,
+            fill   = palette$swatch[2],
+            colour = 'transparent',
+            alpha  = .2) +
+    annotate('rect',
+           xmin    = 316,
+           xmax    = 412,
+           ymin    = -Inf,
+           ymax    = +Inf,
+            fill   = palette$swatch[2],
+            colour = 'transparent',
+            alpha  = .2) +
+  # Add Vertical line at 0
+  geom_hline(yintercept = 0, 
+             colour     = palette$swatch[1]) +
+  geom_vline(xintercept = 0, 
+             colour     = palette$swatch[1]) +
+  annotate(geom  = 'text', 
+           x     = 250,
+           y     = 1,
+           label = 'N2pc') +
+  annotate(geom  = 'text', 
+           x     = 360,
+           y     = 1,
+           label = 'Ptc') +
+  scale_x_continuous(breaks = seq(-200, 800, 100)) +
+  scale_y_continuous(breaks = seq(-1, 1, .5)) +
+  # Labels
+  labs(x = 'Time (ms)',
+       y = 'Amplitude (mV)',
+       colour = 'Distractor Type') +
+  scale_colour_ggthemr_d()
+
+
+combined <- cowplot::plot_grid(distrTypeErp,
+                   distrPermuPlot,
+                   ncol        = 1, 
+                   align       = 'vh', 
+                   rel_heights = c(1.5,1))
+
+```
+
+### Effects of WMC
+
+The effects of WMC were not significant but visual inspection seemed to tell a different story. Thus they were checked out of precaution. Nonetheless, no significant effects were found.
+
+```{r}
+### Plot Effects of WMC (Other condition pooled)
+trialSubtracted %>% 
+  
+  # Extract ERPs for WMC only (average across all other conditions)
+  dplyr::group_by(wmc, time_point) %>% 
+  dplyr::summarise(avg_signal = mean(subtracted)) %>% 
+  # Plot results
+  ggplot(aes(x      = time_point, 
+             y      = avg_signal,
+             fill   = wmc,
+             colour = wmc)) +
+  geom_line(size = 1.2) +
+  # Set colours
+  scale_colour_manual(values = mycolours,
+                      name   = 'WMC') +
+  scale_fill_manual(values = mycolours) +
+  # Define axis ticks
+  scale_x_continuous(breaks = c(seq(0, 455, 50))) +
+  scale_y_continuous(breaks = c(seq(-5, 5, 0.2)),
+                     labels = scales::comma) + 
+  coord_cartesian(xlim = c(0, 500)) +
+  # Add Vertical line at 0
+  geom_hline(yintercept = 0) +
+  geom_vline(xintercept = 0, colour = 'red') +
+  # Labels
+  labs(x = 'Time (ms)',
+       y = 'Amplitude (mV)',
+       title = "Working Memory Capacity ERPs") +
+  scale_colour_ggthemr_d()
+```
+
+
+```{r}
+### Permutation analyses only for WMC in N2pc time window ###
+
+# Define N2pc time window 
+n2pcTime <- c('start' = 220,
+              'stop'  = 260)
+
+# Compute mean amplitude within the time window
+n2pcWmc <- trialSubtracted %>% 
+  dplyr::group_by(wmc, id) %>% 
+  dplyr::filter(time_point >= wmc.n2pc.time[['start']] & time_point <= wmc.n2pc.time[['stop']]) %>% 
+  dplyr::summarise(signal = mean(subtracted))
+
+# Perform permutation analyses through ez package (permutation version of t-test as we are comparing only two conditions)
+ezPerm(data = n2pcWmc, 
+       dv = signal, 
+       wid = id, 
+       between = wmc, 
+       perms = 10000)
+
+# Double cjheck with coin package
+# coin::oneway_test(signal ~ wmc, data = n2pcWmc, distribution = approximate(10000))
+
+# Plot
+ezPlot(data = n2pcWmc, 
+       dv = signal, 
+       wid = id, 
+       between = wmc.n2pc,
+       x = wmc, 
+       do_lines = FALSE, 
+       do_bars = TRUE)
+```
+
+The results show that there is no significant difference in the N2pc time window between WMC groups. 
+
+We then tested the differences in Ptc
+
+```{r}
+### Permutation analyses only for WMC in N2pc time window ###
+
+# Define Ptc time window 
+ptcTime <- c('start' = 280,
+             'stop'  = 340)
+
+# Compute mean amplitude within the time window
+ptcWmc <- trial.subtracted %>% 
+  dplyr::group_by(wmc, id) %>% 
+  dplyr::filter(time_point >= wmc.ptc.time[['start']] & time_point <= wmc.ptc.time[['stop']]) %>% 
+  dplyr::summarise(signal = mean(subtracted))
+
+# Perform permutation analyses through ez package (permutation version of t-test as we are comparing only two conditions)
+ezPerm(data = ptcWmc, 
+       dv = signal, 
+       wid = id, 
+       between = wmc, 
+       perms = 10000)
+
+# Double cjheck with coin package
+# coin::oneway_test(signal ~ wmc, data = ptcWmc, distribution = approximate(10000))
+
+# Plot
+ezPlot(data = ptcWmc, 
+       dv = signal, 
+       wid = id, 
+       between = wmc.n2pc,
+       x = wmc, 
+       do_lines = FALSE, 
+       do_bars = TRUE)
+```
+
+## Effects of Distractor Type
+
+We observed that distractor circles elicited a late negativity. Through control of the scalp distributions (created in MATLAB), it appeared that the circle-driven negativity had similar neural generators with the L-driven N2pc. Thus, they could both be considered N2pc components. Consequently, we verified whether there was a difference in amplitude between the two. 
+
+```{r}
+### Compare L and O negativities
+
+# Define time windows to compare (only for distractor effects)
+timeWindows <- c('L_start' = 200,
+                  'L_stop'  = 300,
+                  'O_start' = 300,
+                  'O_stop'  = 400)
+
+# Extract mean amplitudes for the two negativities
+negativitiesData <- trialSubtracted %>% 
+  dplyr::filter(time_point >= timeWindows[['L_start']] & time_point <= timeWindows[['O_stop']]) %>% 
+  dplyr::mutate(negativity = dplyr::case_when(time_point < timeWindows[['L_stop']] ~ 'L_negativity',
+                                              time_point >= timeWindows[['O_start']] ~ 'O_negativity')) %>% 
+  dplyr::group_by(id, distractor_type, negativity) %>% 
+  dplyr::summarise(average = mean(subtracted)) %>% 
+  dplyr::filter((distractor_type == 'L' & negativity == 'L_negativity') |
+                (distractor_type == 'O' & negativity == 'O_negativity')) %>% 
+  dplyr::ungroup()
+
+### Compute analyses ###
+# Set seed for replicability
+set.seed(2021)
+# Statistical analyses of the difference between the two negativities (should be null)
+distrNegTest <- coin::oneway_test(average ~ distractor_type | id, 
+                                    data         = negativitiesData, 
+                                    distribution = approximate(10000))
+
+# alternative
+# ez::ezPerm(data = negativitieData, dv = average, wid = id, within = distractor_type, perms = 10000)
+```
+
+To fully understand the data, the activity elicited by circles in the time window 400ms-500ms was investigated as a possible late Ptc.
+
+```{r}
+### Late circle Ptc ###
+
+# Extract mean amlitudes in defined window
+latePtc <- trialSubtracted %>% 
+  dplyr::filter((time_point >= 400 & time_point <= 500),
+                distractor_type == 'O') %>% 
+  dplyr::group_by(id) %>% 
+  dplyr::summarise(avg = mean(subtracted)) %>% 
+  tibble::add_column(time = 'ptc')
+
+# Compute baseline value for comparison
+baseline <- trialSubtracted %>% 
+  dplyr::filter((time_point < 0),
+                distractor_type == 'O') %>% 
+  dplyr::group_by(id) %>% 
+  dplyr::summarise(avg = mean(subtracted)) %>% 
+  tibble::add_column(time = 'baseline')
+
+late.ptc.all <- rbind(late.ptc, baseline)
+
+# Compare late Ptc with baseline
+coin::oneway_test(avg ~ factor(time) | id, data = late.ptc.all, distribution = approximate(10000))
+
+# Alternatively
+# ez::ezPerm(data = late.ptc.all, dv = avg, wid = id, within = time, perms = 10000)
+```
+

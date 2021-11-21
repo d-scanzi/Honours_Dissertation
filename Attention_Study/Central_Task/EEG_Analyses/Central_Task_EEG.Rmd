@@ -1,0 +1,229 @@
+---
+title: "Central_Task_EEG"
+author: "Daniele Scanzi"
+date: "22/11/2021"
+output: html_document
+---
+
+```{r include=FALSE}
+# Load all the necessary packages
+library(here)
+library(tidyverse)
+library(janitor)
+library(ggplot2)
+library(Rmisc)
+library(RColorBrewer)
+library(ggthemes)
+library(permuco)
+library(brms)
+library(ggmcmc)
+library(mcmc)
+library(ggthemr)
+library(coin)
+library(ez)
+# Plotting Theme
+palette <- define_palette(
+  swatch = c('#111111', '#E84646', '#233B43', '#C29365', '#168E7F', '#65ADC2', '#109B37', '#DB784D', '#f1c40f'),
+  gradient = c(lower = '#E84646', upper = '#109B37'))
+ggthemr(palette, layout = 'scientific')
+```
+
+Load datasets containing single-trial information from electrode 58 (P58) and electrode 96 (P96). Each trial contained a lateralized distractor. 
+
+```{r}
+### LOAD CENTRAL TASK DATA ###
+
+highWMCdata <- read_csv(here::here('SingleTrials_Datasets', 'High_SingleTrial_Central_All.csv')) %>% 
+  # Pivot longer
+  tidyr::pivot_longer(cols = '-200':dplyr::last_col(),
+                      names_to = 'time_point',
+                      values_to = 'signal') %>% 
+  # Clean column names
+  janitor::clean_names() %>% 
+  dplyr::select(trial,part_column, wmc_column, electrode, electrode_position, distractor_type, distractor_colour, distractor_position, time_point, signal) %>% 
+  dplyr::rename(wmc = wmc_column,
+                id = part_column) %>% 
+  dplyr::mutate(wmc = replace(wmc, wmc == 'hig', 'high'))
+
+lowWMCdata <- read_csv(here::here('SingleTrials_Datasets', 'Low_SingleTrial_Central_All.csv')) %>% 
+  # Pivot longer
+  tidyr::pivot_longer(cols = '-200':dplyr::last_col(),
+                      names_to = 'time_point',
+                      values_to = 'signal') %>% 
+  # Clean column names
+  janitor::clean_names() %>% 
+  dplyr::select(trial,part_column, wmc_column, electrode, electrode_position, distractor_type, distractor_colour, distractor_position, time_point, signal) %>% 
+  dplyr::rename(wmc = wmc_column,
+                id = part_column) %>% 
+  dplyr::mutate(wmc = replace(wmc, wmc == 'hig', 'high'))
+
+# Join the data in a single dataset
+trialData <- rbind(highWMCdata,
+                    lowWMCdata) %>% 
+  dplyr::mutate(id                  = factor(id),
+                wmc                 = factor(wmc),
+                electrode           = factor(electrode),
+                electrode_position  = factor(electrode_position),
+                distractor_type     = factor(distractor_type),
+                distractor_colour   = factor(distractor_colour),
+                distractor_position = as_factor(distractor_position),
+                time_point          = as.numeric(time_point))
+```
+
+```{r}
+# Compute subtracted waveforms
+trialSubtracted <- trialData %>% 
+  dplyr::select(!electrode) %>% 
+  #dplyr::group_by(wmc, id, distractor_type, distractor_colour, distractor_position) %>% 
+  tidyr::pivot_wider(names_from = electrode_position,
+                     values_from = signal) %>% 
+  # Compute contra - Ipsi
+  dplyr::mutate(subtracted = contra - ipsi) %>% 
+  dplyr::ungroup()
+
+# Compute across trials - within condition for each subject
+subjectAvg <- trialSubtracted %>% 
+  dplyr::group_by(wmc, id, distractor_type, distractor_colour, time_point) %>% 
+  dplyr::summarise(avg_signal = mean(subtracted)) %>% 
+  dplyr::ungroup()
+
+conditionAvg <- trialSubtracted %>% 
+  dplyr::group_by(wmc, distractor_type, distractor_colour, time_point) %>% 
+  dplyr::summarise(avg_signal = mean(subtracted)) %>% 
+  dplyr::ungroup()
+  
+```
+
+
+```{r}
+### BUTTERFLY PLOTS ###
+
+# Plot butterfly plots for high WMC 
+subjectavg %>% 
+  dplyr::filter(wmc == 'high') %>% 
+  dplyr::group_by(wmc, id, distractor_type, time_point) %>% 
+  dplyr::summarise(avg_signal = mean(avg_signal)) %>% 
+  ggplot(aes(x      = time_point, 
+             y      = avg_signal,
+             fill   = id,
+             colour = id)) +
+  geom_line(size  = .75,
+            alpha = .85) +
+  # Set axis ticks
+  scale_x_continuous(breaks = c(seq(-200, 800, 200))) +
+  scale_y_continuous(breaks = c(seq(-5, 5, 0.5))) + 
+  coord_cartesian() +
+  # Add orizontal line at 0 and red vertical line at onset of stimulus
+  geom_hline(yintercept = 0) +
+  geom_vline(xintercept = 0, colour = 'red') +
+   # Set labels
+  labs(x = 'Time (ms)',
+       y = 'Amplitude (\U003BCV)',
+       title = 'Butterfly plots for each condition P58/P96') +
+  theme_tufte(base_size = 12) +
+  facet_grid(id~distractor_type) +
+  theme(legend.position = 'none') 
+
+# Plot butterfly plots for low WMC
+# Plot butterfly plots for each condition 
+subjectavg %>% 
+  dplyr::filter(wmc == 'high') %>% 
+  dplyr::group_by(wmc, id, distractor_type, time_point) %>% 
+  dplyr::summarise(avg_signal = mean(avg_signal)) %>% 
+  ggplot(aes(x      = time_point, 
+             y      = avg_signal,
+             fill   = id,
+             colour = id)) +
+  geom_line(size  = .75,
+            alpha = .85) +
+  # Set axis ticks
+  scale_x_continuous(breaks = c(seq(-200, 800, 200))) +
+  scale_y_continuous(breaks = c(seq(-5, 5, 0.5))) + 
+  coord_cartesian() +
+  # Add orizontal line at 0 and red vertical line at onset of stimulus
+  geom_hline(yintercept = 0) +
+  geom_vline(xintercept = 0, colour = 'red') +
+   # Set labels
+  labs(x = 'Time (ms)',
+       y = 'Amplitude (\U003BCV)',
+       title = 'Butterfly plots for each condition P58/P96') +
+  theme_tufte(base_size = 12) +
+  facet_grid(id~distractor_type) +
+  theme(legend.position = 'none')
+```
+
+# Permutation Analyses
+```{r message=FALSE, warning=FALSE}
+### PREPARE DATA FOR ANALYSES ###
+
+# Create wide dataset with a coloum for each time point
+permuDistrData <- subjectAvg %>% 
+
+  # Pivot wider to prepare data as permuco package requires
+  dplyr::group_by(wmc, id, distractor_type, distractor_colour) %>% 
+  tidyr::pivot_wider(names_from = time_point,
+                     values_from = avg_signal) %>% 
+  # Remove datapoints before stimulus onset and after 456ms
+  dplyr::select(!('-200':'-4') & !('456':dplyr::last_col())) %>% 
+  dplyr::ungroup()
+
+# Create data and design dataframes for permuco
+distrSignal <- permuDistrData %>% 
+  dplyr::select('0':last_col())
+distrDesign <- permuDistrData %>% 
+  dplyr::select(wmc:distractor_colour)
+```
+
+```{r}
+set.seed(2021)
+permDistrTest <- permuco::clusterlm(distr.signal ~ wmc * distractor_type * distractor_colour + Error(id/(distractor_type * distractor_colour)),
+                                      data = distrDesign,
+                                      method = "Rde_kheradPajouh_renaud",
+                                      multcomp = 'troendle', 
+                                      np = 10000)
+
+plot(permDistrTest)
+```
+
+```{r}
+### RECREATE PLOT ONLY FOR SIGNIFICANT EFFECT OF DISTRACTOR TYPE
+central.plot <- trial.subtracted %>% 
+  
+  # Extract ERPs for distractor type only (average across all other conditions)
+  dplyr::group_by(distractor_type, time_point) %>% 
+  dplyr::summarise(avg_signal = mean(subtracted)) %>% 
+  # Plot results
+  ggplot(aes(x      = time_point, 
+             y      = avg_signal,
+             fill   = distractor_type,
+             colour = distractor_type)) +
+  geom_line(size = 1.2) +
+  annotate('rect',
+           xmin    = 200,
+           xmax    = 300,
+           ymin    = -Inf,
+           ymax    = +Inf,
+            fill   = palette$swatch[2],
+            colour = 'transparent',
+            alpha  = .2) +
+    annotate('rect',
+           xmin    = 300,
+           xmax    = 400,
+           ymin    = -Inf,
+           ymax    = +Inf,
+            fill   = palette$swatch[4],
+            colour = 'transparent',
+            alpha  = .2) +
+  # Add Vertical line at 0
+  geom_hline(yintercept = 0, 
+             colour     = palette$swatch[1]) +
+  geom_vline(xintercept = 0, 
+             colour     = palette$swatch[1]) +
+  scale_x_continuous(breaks = seq(-200, 800, 100)) +
+  scale_y_continuous(breaks = seq(-1, 1, .5)) +
+  # Labels
+  labs(x      = 'Time (ms)',
+       y      = 'Amplitude (\U003BCV)',
+       colour = 'Distractor Type') +
+  scale_colour_ggthemr_d()
+```

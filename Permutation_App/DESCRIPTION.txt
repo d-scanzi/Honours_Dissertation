@@ -1,0 +1,4 @@
+Author: Daniele Scanzi
+DisplayMode: Showcase
+Licence: GPL-3
+Type: Shiny

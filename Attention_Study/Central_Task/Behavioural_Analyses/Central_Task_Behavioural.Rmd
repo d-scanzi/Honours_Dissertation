@@ -1,0 +1,341 @@
+---
+title: "Central_Task_Behavioural"
+author: "Daniele Scanzi"
+date: "15/10/2021"
+output: html_document
+---
+The following notebook contains the code used for analyses of Reaction Times and Accuracy in the central task (control). Three predictors were included in the analyses:
+* WMC: working memory capacity
+* Distractor Type: L or Circle (O)
+* Distractor Colour: Green (Gr) or Orange (Or)
+
+```{r}
+# Packages required for the analyses
+library(tidyverse)
+library(here)
+library(janitor)
+library(ggplot2)
+library(psych)
+library(pastecs)
+library(PerformanceAnalytics)
+library(cowplot)
+library(car)
+library(ggdist)
+library(knitr)
+library(coin)
+library(ez)
+library(ggthemr)
+library(ggsignif)
+library(parallel)
+
+# Define theme for plotting using ggthemr
+palette <- define_palette(
+  swatch   = c('#111111', '#E84646', '#233B43', '#C29365', '#168E7F', '#65ADC2', '#109B37', '#DB784D'),
+  gradient = c(lower = '#E84646', 
+               upper = '#109B37'))
+ggthemr(palette, layout = 'scientific')
+```
+
+```{r}
+# Load
+originalData <- read_csv(here::here('Datasets', 'BehaviouralData.csv'))
+
+# Define Working Memory Groups (defined through previous analyses)
+highWMC <- c(2, 3, 4, 9, 21, 27, 30, 31, 34)
+lowWMC <- c(6, 7, 8, 12, 14, 17, 20, 22, 23, 32, 37, 39, 41)
+
+# Clean up the data. Eprime saves a bunch of variables that are useless and can be removed. 
+cleanData <- originalData %>% 
+  select('Subject',
+         'Age',
+         'Sex',
+         'Handedness',
+         'Procedure_Block_',
+         'Trial',
+         'Response_ACC',
+         'Response_RT',
+         'StimTrig',
+         'StimTrig2',
+         'newTargPos':'newDistance') %>% 
+  
+  # Standardize row names (all lower case; style word1_word2)
+  janitor::clean_names() %>% 
+  
+  # Add wmc information for each participant
+  dplyr::mutate(wmc_group = case_when(
+    (subject %in% highWMC) ~ 'high',
+    (subject %in% lowWMC) ~ 'low'),
+    new_distr_type = replace(new_distr_type, new_distr_type == '0', 'O' )) %>% # Some Os were saved as zeros
+  
+  # Select only centeal task trials
+  dplyr::filter(procedure_block == 'BlockControl') %>% 
+  
+  #Trasform response times in numeric values
+  dplyr::mutate(response_rt = as.integer(response_rt))
+```
+
+# Reaction Times Analyses
+```{r}
+rtDataset <- cleanData %>% 
+  # Group observations according to the three predictors for each subject 
+  # WMC is not needed as each subject is associated to only one WMC group 
+  # and we are not interested here in collapsing across groups (which requires to collapse across subjects)
+  dplyr::group_by(subject, new_distr_type, new_distr_col) %>% 
+  
+  # Remove RT = 0, which probably are people that did not responded
+  dplyr::filter(response_rt != 0) %>%
+  
+  #Compute mean for each subject
+  dplyr::mutate(rt_mean = mean(response_rt)) %>%
+  # Retain only useful columns
+  dplyr::select(subject, wmc_group, new_distr_type, new_distr_col, rt_mean) %>% 
+  # Remove duplicated rows 
+  # dataset is in long-format, thus each subject has the same exact mean information in
+  # each row in the new dataset
+  distinct(subject, .keep_all = TRUE)
+```
+
+## RT Descriptives
+```{r}
+### Compute descriptive statistics for each group ###
+rtDataset %>% 
+  dplyr::group_by(wmc_group, new_distr_type, new_distr_col) %>% 
+  dplyr::summarise(n       = n(),
+            avg            = mean(rt_mean),
+            median         = median(rt_mean),
+            sd             = sd(rt_mean, na.rm = TRUE), 
+            se             = sd / sqrt(n), 
+            min            = min(rt_mean),
+            max            = max(rt_mean),
+            IQR            = IQR(rt_mean), 
+            skew           = skew(rt_mean),
+            kurt           = kurtosi(rt_mean),
+            shapiro.stat   = shapiro.test(rt_mean)$statistic,
+            shapiro.pvalue = shapiro.test(rt_mean)$p.value)
+```
+
+## RT Permutation Analyses
+```{r}
+### Set up parameters for permutations ###
+set.seed(2021) # For replicability
+doParallel::registerDoParallel(cores = parallel::detectCores()) # Multi core computation for speed  (find and use avaiable cores)
+nperm <- 10000 # Number of permutations
+paral <- TRUE # Use parallel?
+```
+
+```{r}
+### Perform Permutation Mixed-Design ANOVA type analysis ###
+rtBehav <- ez::ezPerm(data      = rtDataset, 
+                       dv       = rt_mean, 
+                       wid      = subject,
+                       within   = c(new_distr_type, new_distr_col), 
+                       between  = wmc_group, 
+                       perms    = nperm,
+                       parallel = paral)
+rtBehav
+```
+
+### Main effects of colour
+```{r}
+### Plot distribution, mean and SE for levels of distractor colour
+rtDataset %>% 
+  ggplot(aes(x      = new_distr_col,
+             y      = rt_mean,
+             colour = new_distr_col)) +
+  geom_jitter(width = 0.1, 
+              alpha = 0.25) +
+  stat_summary(fun = 'mean', 
+               geom = 'point',
+               size = 3.2) +
+  stat_summary(fun.data = 'mean_se',
+               geom     = 'errorbar',
+               width    = .2, 
+               size     = 1) +
+  scale_colour_manual(values = palette[['swatch']][c(7,8)]) +
+  # Add significance lines
+  geom_signif(comparisons = list(c('Gr', 'Or')), 
+              annotations = '***',
+              colour      = 'black') +
+  labs(x = 'Distractor Color',
+       y = 'Reaction Times (ms)') +
+  scale_x_discrete(labels = c('Green', 'Orange')) +
+  theme(legend.position = 'none')
+```
+
+### WMC and Distractor type Interaction
+
+This section includes the simple effects analyses for the significant interaction between WMC and distractor type.
+
+```{r}
+### Simple effects for the WMC on each level of Type ###
+
+# Subset according to WMC group
+rtWMC_high <- subset(rt.dataset, wmc_group == 'high') 
+rtWMC_low  <- subset(rt.dataset, wmc_group == 'low')
+
+# High WMC on each level of distractor
+permRThigh <- ez::ezPerm(data   = rtWMC_high, 
+                       dv       = rt_mean, 
+                       wid      = subject,
+                       within   = new_distr_type,
+                       perms    = nperm,
+                       parallel = paral)
+
+# High WMC on each level of distractor
+permRTlow <- ez::ezPerm(data    = rtWMC_low, 
+                       dv       = rt_mean, 
+                       wid      = subject,
+                       within   = new_distr_type,
+                       perms    = nperm,
+                       parallel = paral)
+
+
+### Simple effects for type on each level of WMC ###
+
+# Subset according to WMC group
+rtL <- subset(rt.dataset, new_distr_type == 'L')
+rtO <- subset(rt.dataset, new_distr_type == 'O')
+
+# High L on each level of WMC
+permRTL <- ez::ezPerm(data    = rtL, 
+                       dv       = rt_mean, 
+                       wid      = subject,
+                       between  = wmc_group,
+                       perms    = nperm,
+                       parallel = paral)
+
+permRTO <- ez::ezPerm(data    = rtO, 
+                       dv       = rt_mean, 
+                       wid      = subject,
+                       between  = wmc_group,
+                       perms    = nperm,
+                       parallel = paral)
+```
+
+```{r}
+### WMC:Type interaction Plot ###
+rtDataset %>% 
+  ggplot(aes(x      = new_distr_type, 
+             y      = rt_mean,
+             group  = wmc_group,
+             colour = wmc_group)) +
+  geom_jitter(width = 0.1, 
+              alpha = .25) +
+  stat_summary(fun = 'mean', 
+               geom = 'point',
+               size = 2.5) +
+  stat_summary(fun  = 'mean',
+               geom = 'line') +
+  stat_summary(fun.data = 'mean_se',
+               geom     = 'errorbar',
+               width    = .08) +
+  scale_colour_ggthemr_d() +
+  # Add significance lines
+  geom_signif(comparisons = list(c('L', 'O')), 
+              annotations = '***',
+              colour      = 'black') +
+  annotate(geom    = 'text', 
+           x       = 1.5,
+           y       = 1600, 
+           label   = 'Both WMC groups',
+              size = 2) +
+  labs(x = 'Distractor Type',
+       y = 'Reaction Times (ms)',
+       colour = 'WMC') +
+  scale_x_discrete(labels = c('L', 'Circle'))
+```
+
+# Accuracy Analyses
+```{r}
+### Extract accuracy values for each condition and participant ###
+accDataset <- cleanData %>% 
+  
+  # Group observations according to the three predictors for each subject 
+  # WMC is not needed as each subject is associated to only one WMC group 
+  # and we are not interested here in collapsing across groups (which requires to collapse across subjects)
+  group_by(subject, new_distr_type, new_distr_col) %>% 
+  
+  # Remove RT = 0, which probably are people that did not responded
+  filter(response_rt != 0) %>%
+  
+  #Compute accuracy for each subject as number correct trials over tot of trials
+  mutate(accuracy = sum(response_acc) / n()) %>% 
+  # Retain only useful columns
+  select(subject, wmc_group, new_distr_type, new_distr_col, accuracy) %>% 
+  # Remove duplicated rows 
+  # dataset is in long-format, thus each subject has the same exact mean information in
+  # each row in the new dataset
+  distinct(subject, .keep_all = TRUE)
+```
+
+## Accuracy Descriptives
+```{r}
+### Descriptives statistics for accuracy scores ###
+accDataset %>% 
+  group_by(wmc_group, new_distr_type, new_distr_col) %>% 
+  summarise(n = n(),
+            rt.mean        = mean(accuracy),
+            median         = median(accuracy),
+            sd             = sd(accuracy, na.rm = TRUE), 
+            se             = sd / sqrt(n), 
+            min            = min(accuracy),
+            max            = max(accuracy),
+            IQR            = IQR(accuracy), 
+            skew           = skew(accuracy),
+            kurt           = kurtosi(accuracy),
+            shapiro.stat   = shapiro.test(accuracy)$statistic,
+            shapiro.pvalue = shapiro.test(accuracy)$p.value)
+
+### QQ-Plot ###
+
+# High WMC
+accDataset %>% 
+  dplyr::filter(wmc_group == 'high') %>% 
+  ggplot(aes(sample = accuracy, 
+             colour = new_distr_col,
+             fill   = new_distr_col,
+             group  = new_distr_col)) +
+  stat_qq(show.legend = FALSE) +
+  stat_qq_line(size  = .8,
+               alpha = .8) +
+  scale_colour_manual(values = palette[['swatch']][c(7,8)],
+                      name   = 'Distractor Colour') +
+  facet_wrap(~new_distr_type) +
+  labs(y = 'Sample Quantile')
+
+# Low WMC
+accDataset %>% 
+  dplyr::filter(wmc_group == 'low') %>% 
+  ggplot(aes(sample = accuracy, 
+             colour = new_distr_col,
+             fill   = new_distr_col,
+             group  = new_distr_col)) +
+  stat_qq(show.legend = FALSE) +
+  stat_qq_line(size  = .8,
+               alpha = .8) +
+  scale_colour_manual(values = palette[['swatch']][c(7,8)],
+                      name   = 'Distractor Colour') +
+  facet_wrap(~new_distr_type) +
+  labs(y = 'Sample Quantile')
+
+### Levene Test for Normality Assumption
+car::leveneTest(accuracy~wmc_group*new_distr_type*new_distr_col, 
+           data = accDataset)
+```
+
+## Accuracy Permutation Analyses
+
+Note: the accuracy scores appeared to be at chance level for each group. Thus, the analyses showed no significant effects. 
+
+```{r}
+accBehav <- ez::ezPerm(data     = accDataset, 
+                       dv       = accuracy, 
+                       wid      = subject,
+                       within   = c(new_distr_type, new_distr_col), 
+                       between  = wmc_group, 
+                       perms    = 10000,
+                       parallel = TRUE)
+
+accBehav
+```
+

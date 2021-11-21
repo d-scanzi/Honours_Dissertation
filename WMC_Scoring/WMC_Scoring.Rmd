@@ -1,0 +1,137 @@
+---
+title: "WMC_Scoring"
+author: "Daniele Scanzi"
+date: "22/11/2021"
+output: html_document
+---
+
+```{r}
+# Load Packages -----------------------------------------------------------
+
+library(readr)
+library(dplyr)
+library(englelab)
+
+
+# Prepare data ------------------------------------------------------------
+
+## Set working directory
+setwd("H:/LenoreData/WorkWithThis/DataOrganized/Merged/TXTMerged")
+
+## Import txt files
+
+#Rotation Span Task
+data_import_rot <- readr::read_delim("txt_RotationSpan_Merged.txt", "\t", 
+                          escape_double = FALSE, trim_ws = TRUE)
+
+#Symmetry Span Task
+data_import_sym <- readr::read_delim("txt_SymmetrySpan_Merged.txt", "\t", 
+                                     escape_double = FALSE, trim_ws = TRUE)
+
+#Operation Span Task
+data_import_ope <- readr::read_delim("txt_OperationSpan_Merged.txt", "\t", 
+                                     escape_double = FALSE, trim_ws = TRUE)
+
+
+## Raw files - these clean up the raw dataframes for further processing
+data_raw_rot <- raw_rotspan(data_import_rot, taskVersion = "old") # rotation
+data_raw_sym <- raw_symspan(data_import_sym, taskVersion = "old") # symmetry
+data_raw_ope <- raw_ospan(data_import_ope, taskVersion   = "old")   # operation
+
+
+# Score participants ------------------------------------------------------
+
+## Scores - Output data frames containing the scores for each task
+score_rot <- data_raw_rot %>%
+  group_by(Subject) %>%
+  score_rotspan()
+  
+
+score_sym <- data_raw_sym %>%
+  group_by(Subject) %>%
+  score_symspan()
+  
+
+score_ope <- data_raw_ope %>%
+  group_by(Subject) %>%
+  score_ospan()
+
+
+# Save files
+#write.csv(score_rot, "RotationSpan.csv")
+#write.csv(score_sym, "SymmetrySpan_Scores.csv")
+#write.csv(score_ope, "OperationSpan_Scores.csv")
+
+
+# Extract relevant information --------------------------------------------
+
+# Rename variables in dataframes
+new_names <- c('subject',
+              'partial.score',
+              'partial.unit',
+              'partial.load', 
+              'absolute.score',
+              'absolute.unit',
+              'absolute.load',
+              'rt.mean',
+              'rt.sd',
+              'accuracy',
+              'trials',
+              'number.items')
+
+#Normalize column names across datasets
+names(score_ope) <- new_names
+names(score_rot) <- new_names
+names(score_sym) <- new_names
+
+#Add identification column
+score_ope['task'] <- 'operation'
+score_rot['task'] <- 'rotation'
+score_sym['task'] <- 'symmetry'
+
+#Merge datasets
+#full_dataset <- rbind(score_ope, score_sym, score_rot)
+
+# Work on datasets
+avg.ope <- score_ope %>% 
+  summarise(avg = mean(partial.score),
+            std = sd(partial.score))
+
+avg.sym <- score_sym %>% 
+  summarise(avg = mean(partial.score),
+            std = sd(partial.score))
+
+avg.rot <- score_rot %>% 
+  summarise(avg = mean(partial.score),
+            std = sd(partial.score))
+
+# Compute Z-scores for each subject on each task
+z_ope <- score_ope %>% 
+  select(task, subject, partial.score) %>% 
+  mutate(z.score = (partial.score - avg.ope$avg) / avg.ope$std)
+
+z_sym <- score_sym %>% 
+  select(task, subject, partial.score) %>% 
+  mutate(z.score = (partial.score - avg.sym$avg) / avg.sym$std)
+
+z_rot <- score_rot %>% 
+  select(task, subject, partial.score) %>% 
+  mutate(z.score = (partial.score - avg.rot$avg) / avg.rot$std)
+
+# Merge z_scores
+zscores <- rbind(z_ope, z_sym, z_rot)
+
+# Compute final value
+subjects_WM <- zscores %>% 
+  group_by(subject) %>% 
+  summarise(WMC = mean(z.score))
+
+# Extract meadian and mean values of WMC scores
+WMC_summarise <- subjects_WM %>% 
+  summarise(avg = mean(WMC), 
+            med = median(WMC))
+# Find the 33 and 66 percentiles
+break_point <- quantile(zscores$z.score, probs = c(.33, .66))
+
+```
+

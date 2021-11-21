@@ -1,0 +1,345 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r include=FALSE}
+### Set up the environment  ###
+# Load all the necessary packages
+library(here)
+library(tidyverse)
+library(janitor)
+library(ggplot2)
+library(Rmisc)
+library(RColorBrewer)
+library(ggthemes)
+library(permuco)
+library(brms)
+library(ggmcmc)
+library(mcmc)
+library(ggthemr)
+# Plotting Theme
+palette <- define_palette(
+  swatch = c('#111111', '#E84646', '#233B43', '#C29365', '#168E7F', '#65ADC2', '#109B37', '#DB784D', '#f1c40f'),
+  gradient = c(lower = '#E84646', upper = '#109B37'))
+ggthemr(palette, layout = 'scientific')
+# Distractors sides
+right.distractors <- c(2,3,4,5,6,7,8)
+left.distractors <- c(10,11,12,13,14,15,16)
+```
+
+```{r}
+### LOAD AND PREPARE DATA ###
+# Data was extracted through MATLAB and required some data wrangling
+# HIGH WMC DATA
+# Dataset should be contained in a folder called Datasets within the current directory
+highWMCdata <- read_csv(here::here('Datasets', 'EEG_SingleTrial_High.csv')) %>% 
+  # Pivot longer 
+  tidyr::pivot_longer(cols      = '-200':dplyr::last_col(),
+                      names_to  = 'time_point',
+                      values_to = 'signal') %>% 
+  # Clean column names (all lower case, style:name1_name2)
+  janitor::clean_names() %>% 
+  # Select relevant coloumns
+  dplyr::select(trial,part_column, wmc_column, electrode, electrode_position, distractor_type, distractor_colour, distractor_position, time_point, signal) %>% 
+  dplyr::rename(wmc = wmc_column,
+                id  = part_column) %>% 
+  dplyr::mutate(wmc = replace(wmc, wmc == 'hig', 'high'))
+# LOW WMC DATA
+# Dataset should be contained in a folder called Datasets within the current directory
+lowWMCdata <- read_csv(here::here('SingleTrials_Datasets', 'Low_SingleTrial_All.csv')) %>% 
+  # Pivot longer
+  tidyr::pivot_longer(cols      = '-200':dplyr::last_col(),
+                      names_to  = 'time_point',
+                      values_to = 'signal') %>% 
+  # Clean column names
+  janitor::clean_names() %>% 
+  dplyr::select(trial,part_column, wmc_column, electrode, electrode_position, distractor_type, distractor_colour, distractor_position, time_point, signal) %>% 
+  dplyr::rename(wmc = wmc_column,
+                id  = part_column) %>% 
+  dplyr::mutate(wmc = replace(wmc, wmc == 'hig', 'high'))
+# Join the data in a single dataset
+trialData <- rbind(highWMCdata,
+                   lowWMCdata) %>% 
+  # Trasform relevant columns into factors
+  dplyr::mutate(id                  = factor(id),
+                wmc                 = factor(wmc),
+                electrode           = factor(electrode),
+                electrode_position  = factor(electrode_position),
+                distractor_type     = factor(distractor_type),
+                distractor_colour   = factor(distractor_colour),
+                distractor_position = as_factor(distractor_position),
+                time_point          = as.numeric(time_point))
+```
+
+# Compute subtraction
+
+Ipsi - Contralateral in reference to the side of the presentation of the distractor
+```{r}
+### Compute subtracted waveforms ###
+trialSubtracted <- trialData %>% 
+  dplyr::select(!electrode) %>% 
+  tidyr::pivot_wider(names_from  = electrode_position,
+                     values_from = signal) %>% 
+  # Compute contra - Ipsi
+  dplyr::mutate(subtracted = contra - ipsi) %>% 
+  dplyr::group_by()
+```
+
+
+# Bayesian Approach for N2pc
+```{r}
+### PREPARE DATA FOR MODEL ###
+
+# Ptc Time Window
+ptcTime <- c('start' = 280,
+               'stop' = 340)
+
+### PREPARE DATA ###
+bayesData <- trialSubtracted %>% 
+  dplyr::select(!c(ipsi, contra)) %>% 
+  
+  # Compute N2pc mean value by selecting only the relevant time window
+  dplyr::filter(time_point >= ptcTime [['start']] & time_point <= ptcTime [['stop']]) %>% 
+  dplyr::group_by(wmc, id, trial, distractor_type, distractor_colour) %>% 
+  dplyr::summarise(n2pc_signal = mean(subtracted)) %>% 
+
+  # Modify variable names for easy plotting and clean results
+  dplyr::rename(type   = distractor_type,
+                colour = distractor_colour) %>% 
+  dplyr::mutate(wmc    = factor(wmc),
+                type   = factor(type),
+                colour = factor(colour),
+                id     = factor(id))
+
+# Set reference levels to Low WMC-Circle-Green
+bayesData$wmc <- relevel(bayesData$wmc, ref = 'low')
+bayesData$type <- relevel(bayesData$type, ref = 'O')
+bayesData$colour <- relevel(bayesData$colour, ref = 'Gr')
+
+
+```
+
+```{r}
+### DEFINE MODEL PARAMETERS ###
+iterations       = 10000 # Number of iterations per chain
+warmup           = 2500 # Number of burning iteration (length of warm up period that will be discarded)
+ncores           = parallel::detectCores()# Number of RAM cores
+chains           = 4    # Number of Markov Chains to create to estimate the prior distribution
+seed             = 2021
+inits            = 'random' # Randomly generates initial values
+tapap            = .80 # Target-Average-Proposal-Acceptance-Probability (increase to decrease the step size during estimation)
+```
+
+The mixed effects Bayesian model is fitted using the package *brms* which interfaces R with STAN. 
+
+```{r}
+### CREATE MODEL ###
+model1  <- brms::brm(formula = n2pc_signal ~ 1 + wmc * type * colour + (1|id),
+                     data    = bayesData,
+                     warmup  = warmup,
+                     iter    = iterations,
+                     chains  = chains,
+                     inits   = inits,
+                     cores   = ncores,
+                     control = list(adapt_delta = tapap),
+                     seed    = seed)
+```
+
+All the chains converged and no warnings were reported. The results of the model are:
+```{r}
+# Results of the model
+summary(model1)
+# Results using 95% HDI and ROPE
+sjstats::equivalence_test(model1, ci = .95)
+```
+
+## Verify correct convergence of the model
+
+In this section we will follow the When-to-Worry-and-How-to-Avoid-the-Misuse-of-Bayesian-Statistics – checklist (WAMBS-checklist) (Depaoli and van de Schoot, 2017) to verify that the model converged correctly and it is reliable.
+
+1) The first step is to check that trace plots exhibit convergence. *brsm* did not output any warning message, but it is still preferable to visually verify this. 
+```{r}
+### TRACE PLOTS ###
+model1.df <- ggmcmc::ggs(model1) # Transform model data into a long tibble
+# Define parameters to plot
+paramToPlot <- c('sigma',
+                 'b_Intercept', 
+                 'b_wmc', 
+                 'b_typeL', 
+                 'b_colourOr', 
+                 'b_typeL:colourOr',
+                 'b_wmchigh:typeL',
+                 'b_wmchigh:colourOr',
+                 'b_wmchigh:typeL:colourOr')
+
+# Trace plots for main effects
+trace1 <- model1.df %>% 
+  dplyr::filter(Parameter %in% paramToPlot[1:5]) %>% 
+  ggplot(aes(x   = Iteration,
+             y   = value, 
+             col = as.factor(Chain))) +
+  geom_line(alpha = .5) +
+  geom_vline(xintercept = warmup) +
+  scale_colour_ggthemr_d() +
+  facet_grid(Parameter ~ .,
+             scale  = 'free_y',
+             switch = 'y') +
+  labs(title  = 'Chains Convergence',
+       colour = 'Chains') +
+  theme(strip.text.y.left = element_text(angle = 0))
+
+# Trace plots for interactions
+trace2 <- model1.df %>% 
+  dplyr::filter(Parameter %in% paramToPlot[6:9]) %>% 
+  ggplot(aes(x   = Iteration,
+             y   = value, 
+             col = as.factor(Chain))) +
+  geom_line(alpha = .5) +
+  geom_vline(xintercept = warmup) +
+  scale_colour_ggthemr_d() +
+  facet_grid(Parameter ~ .,
+             scale  = 'free_y',
+             switch = 'y') +
+  labs(title = 'Chains Convergence',
+       colour = 'Chains') +
+  theme(strip.text.y.left = element_text(angle = 0))
+
+# Plot trace plots together
+cowplot::save_plot(paste(t, 'trace2.png'), plot = trace2)
+
+# Use pp_check function
+pp_check(model1, type = 'ecdf_overlay')
+```
+
+The trace plots show convergence much earlier than the end of the warm up period (vertical black line). We can also assess the Gelman-Rubin and Gewek's diagnostics to assess convergence. 
+
+```{r}
+model1.posterior <- as.mcmc(model1) # Extract info for diagnostic
+
+# Gelman Diagnostic (Rhat)
+coda::gelman.diag(model1.posterior[, 1:10])
+coda::gelman.plot(model1.posterior[, 1:10])
+```
+
+The Gelman-Rubin's Diagnostic evaluates the within and between chain variability. As the upper C.I. are all 1, which is evidence for correct convergence. 
+
+The Geweke's diagnostics computes a test for equality of means, in Z-scores, between the last and first portion of the chains. Thus, correct convergence should return a value less than |1.96|.
+
+```{r}
+coda::geweke.diag(model1.posterior[, 1:10])
+coda::geweke.plot(model1.posterior[, 1:10])
+```
+
+The results support the above conclusions, further supporting correct convergence of the chains. 
+
+2) The second step is to verify if the posterior distributions have enough information. It is possible to do so by inspecting the posterior distribution histograms. 
+
+```{r}
+# Posterior Distributions
+stanplot(model1, type = 'hist')
+```
+
+The posterior distributions are centered and normally shaped with smooth slopes. Thus, the number of iterations was sufficient to extract enough information. 
+
+3) The third step consists in evaluating the autocorrelation of the chains.
+
+```{r}
+coda::autocorr.diag(model1.posterior[, 1:10],
+                    lags = c(0, 1,2,3,4,5,10,25,50))
+```
+
+4) Finally, posterior distribution can be visually analized to verify that they are reasonably meaningful. 
+
+```{r}
+### PLOT POSTERIOR DISTRIBUTIONS WITH ROPES AND HDI ###
+
+# Extract HDI and ROPE
+eqTest <- sjstats::equivalence_test(model1, ci = .95)
+model1HDI <- eqTest[, c(1, 5, 7,8)] %>% 
+  # Change model parameter names for nicer plotting
+  dplyr::mutate(Parameter = case_when(Parameter == 'b_Intercept' ~ 'Intercept',
+                                      Parameter == 'b_wmc' ~ 'WMC',
+                                      Parameter == 'b_type' ~ 'Type',
+                                      Parameter == 'b_colour' ~ 'Color',
+                                      Parameter == 'b_wmc:type' ~ 'WMC:Type',
+                                      Parameter == 'b_wmc:colour' ~ 'WMC:Color',
+                                      Parameter == 'b_type:colour' ~ 'Type:Color',
+                                      Parameter == 'b_wmc:type:colour' ~ 'WMC:Type:Color')) %>% 
+  # Reorder factors for better plotting
+  dplyr::mutate(Parameter = fct_relevel(Parameter, levels = c('WMC:Type:Color',
+                                                              'Type:Color',
+                                                              'WMC:Color',
+                                                              'WMC:Type',
+                                                              'Color',
+                                                              'Type',
+                                                              'WMC',
+                                                              'Intercept')))
+
+
+dataToPlot <- model1.df %>% 
+  # Select factors of interest
+  dplyr::filter(Parameter %in% c('b_Intercept', 
+                                 'b_wmc', 
+                                 'b_type', 
+                                 'b_colour', 
+                                 'b_wmc:type',
+                                 'b_wmc:colour',
+                                 'b_type:colour',
+                                 'b_wmc:type:colour'),
+                Iteration > warmup) %>% # Exclude warm up iterations as defined above (before model creation)
+  # Standardize names as above
+  dplyr::mutate(Parameter = case_when(Parameter == 'b_Intercept' ~ 'Intercept',
+                                      Parameter == 'b_wmc' ~ 'WMC',
+                                      Parameter == 'b_type' ~ 'Type',
+                                      Parameter == 'b_colour' ~ 'Color',
+                                      Parameter == 'b_wmc:type' ~ 'WMC:Type',
+                                      Parameter == 'b_wmc:colour' ~ 'WMC:Color',
+                                      Parameter == 'b_type:colour' ~ 'Type:Color',
+                                      Parameter == 'b_wmc:type:colour' ~ 'WMC:Type:Color')) %>% 
+  # Relevel factors as above
+  dplyr::mutate(Parameter = fct_relevel(Parameter, levels = c('WMC:Type:Color',
+                                                              'Type:Color',
+                                                              'WMC:Color',
+                                                              'WMC:Type',
+                                                              'Color',
+                                                              'Type',
+                                                              'WMC',
+                                                              'Intercept')))
+bayesPlot1 <- dataToPlot %>%   
+  ggplot() +
+  ggridges::geom_density_ridges(aes(x      = value,
+                                    y      = Parameter,
+                                    height = ..density.., 
+                                    fill   = Parameter,
+                                    colour = Parameter),
+                                scale          = 0.8, 
+                                alpha          = 1) +
+  geom_errorbarh(inherit.aes = FALSE,
+                data         = model1HDI,
+                aes(xmin     = HDI_low,
+                    xmax     = HDI_high,
+                    y        = Parameter,
+                    colour   = Parameter), 
+                size         = .6, 
+                show.legend  = FALSE) +
+  scale_colour_ggthemr_d() +
+  annotate('rect',
+           xmin    = -.61,
+           xmax    = .61,
+           ymin    = -Inf,
+           ymax    = +Inf,
+            fill   = 'red',
+            colour = 'transparent',
+            alpha  = .2) +
+  geom_vline(xintercept = 0,
+             colour     = 'red',
+             size       = 1) +
+  guides(colour = F) +
+  labs(x = 'Ptc Mean Amplitude (mV)',
+       fill = 'Predictors') +
+  guides(fill = 'none')
+
+```
+
+
